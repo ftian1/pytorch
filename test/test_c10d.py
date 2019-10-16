@@ -24,6 +24,7 @@ import torch.nn.functional as F
 import torch.distributed as c10d
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.cpp_extension import load
 
 from common_distributed import MultiProcessTestCase, \
     requires_gloo, requires_nccl, requires_nccl_version, \
@@ -3205,6 +3206,32 @@ class CommTest(MultiProcessTestCase):
         device = torch.device('cpu')
         self._test_broadcast_coalesced(process_group, device)
 
+class BackendLoadingTest(TestCase):
+    def _load_c10d_test_backend(self):
+        src = "{}/cpp_extensions/cpp_c10d_extension.cpp".format(os.path.abspath(os.path.dirname(__file__)))
+        include = "{}/../torch/lib".format(os.path.abspath(os.path.dirname(__file__)))
+        extension = load(
+            name="c10dtest",
+            sources=[src],
+            extra_include_paths=[include]
+        )
+
+    def test_collective_api(self):
+        self._load_c10d_test_backend()
+        os.environ['WORLD_SIZE'] = '1'
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = str(common.find_free_port())
+        os.environ['RANK'] = '0'
+
+        c10d.init_process_group(backend='c10dtest', init_method='env://', world_size=1, rank=0)
+        self.assertEqual(c10d.get_rank(), 0)
+        self.assertEqual(c10d.get_world_size(), 1)
+        with tempfile.NamedTemporaryFile(delete=False) as file:
+            store = c10d.FileStore(file.name, 1)
+            process_group = c10d.distributed_c10d.ProcessGroupC10DTEST(store, 0, 1, '')
+
+            work = process_group.allreduce(torch.rand(1))
+            c10d.destroy_process_group()
 
 if __name__ == '__main__':
     assert not torch.cuda._initialized, "test_distributed must not have initialized CUDA context on main process"
